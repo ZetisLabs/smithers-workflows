@@ -1,0 +1,18 @@
+{
+  "name": "smithers-workflows",
+  "version": "0.1.0",
+  "description": "Centralized AI agent workflows powered by Smithers",
+  "scripts": {
+    "lint": "bunx biome check --write .",
+    "format": "bunx biome format --write ."
+  },
+  "dependencies": {
+    "smithers": "github:evmts/smithers",
+    "@octokit/rest": "^22.0.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@types/bun": "^1.2.5",
+    "typescript": "^5.7.0"
+  }
+}
