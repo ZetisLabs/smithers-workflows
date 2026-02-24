@@ -1,9 +1,28 @@
-import { createSmithers, Sequence, Parallel } from 'smithers-orchestrator'
+import { createSmithers, Sequence } from 'smithers'
 import { ClaudeCodeAgent } from 'smithers'
 import { Octokit } from '@octokit/rest'
 import { z } from 'zod'
 
-// ─── ENV VALIDATION ──────────────────────────────────────────────────────────
+import { frontendAgent } from '../agents/frontend'
+import { backendAgent } from '../agents/backend'
+import { testingAgent } from '../agents/testing'
+import { reviewAgent } from '../agents/review'
+import { securityAgent } from '../agents/security'
+
+// ─── LOGGING ────────────────────────────────────────────────────────────────
+
+function log(message: string): void {
+  const ts = new Date().toISOString()
+  console.log(`[${ts}] [dispatch] ${message}`)
+}
+
+function logError(message: string, err?: unknown): void {
+  const ts = new Date().toISOString()
+  const detail = err instanceof Error ? err.message : String(err ?? '')
+  console.error(`[${ts}] [dispatch] ERROR: ${message}${detail ? ` — ${detail}` : ''}`)
+}
+
+// ─── ENV VALIDATION ─────────────────────────────────────────────────────────
 
 const OWNER = process.env.OWNER
 const REPO = process.env.REPO
@@ -33,17 +52,11 @@ const MODEL_MAP = {
 
 const DEFAULT_MODEL = 'claude-sonnet-4-20250514'
 
-// ─── GITHUB CLIENT ───────────────────────────────────────────────────────────
+// ─── GITHUB CLIENT ──────────────────────────────────────────────────────────
 
 const octokit = new Octokit({ auth: GITHUB_TOKEN })
 
-// ─── AGENT IMPORTS ───────────────────────────────────────────────────────────
-
-import { frontendAgent } from '../agents/frontend'
-import { backendAgent } from '../agents/backend'
-import { testingAgent } from '../agents/testing'
-import { reviewAgent } from '../agents/review'
-import { securityAgent } from '../agents/security'
+// ─── TYPES ──────────────────────────────────────────────────────────────────
 
 type AgentName = 'frontend' | 'backend' | 'testing' | 'review' | 'security'
 
@@ -55,7 +68,7 @@ const agentFactories: Record<AgentName, (model: string) => InstanceType<typeof C
   security: securityAgent,
 }
 
-// ─── LABEL MANAGEMENT ────────────────────────────────────────────────────────
+// ─── LABELS ─────────────────────────────────────────────────────────────────
 
 const LABELS = {
   IN_PROGRESS: 'in-progress',
@@ -66,17 +79,17 @@ const LABELS = {
   MERGE_CONFLICT: 'merge-conflict',
 } as const
 
-async function ensureLabelsExist(): Promise<void> {
-  const labelColors: Record<string, string> = {
-    'in-progress': '0052CC',
-    'triaged': '0E8A16',
-    'needs-fix': 'D93F0B',
-    'rejected': 'B60205',
-    'error': 'E11D48',
-    'merge-conflict': 'FBCA04',
-  }
+const LABEL_COLORS: Record<string, string> = {
+  'in-progress': '0052CC',
+  'triaged': '0E8A16',
+  'needs-fix': 'D93F0B',
+  'rejected': 'B60205',
+  'error': 'E11D48',
+  'merge-conflict': 'FBCA04',
+}
 
-  for (const [name, color] of Object.entries(labelColors)) {
+async function ensureLabelsExist(): Promise<void> {
+  for (const [name, color] of Object.entries(LABEL_COLORS)) {
     try {
       await octokit.issues.createLabel({ owner: OWNER, repo: REPO, name, color })
     } catch {
@@ -89,7 +102,7 @@ async function setLabel(issueNumber: number, label: string): Promise<void> {
   try {
     await octokit.issues.addLabels({ owner: OWNER, repo: REPO, issue_number: issueNumber, labels: [label] })
   } catch (err) {
-    console.error(`[dispatch] Failed to add label "${label}" to #${issueNumber}:`, err)
+    logError(`Failed to add label "${label}" to #${issueNumber}`, err)
   }
 }
 
@@ -105,11 +118,11 @@ async function commentOnIssue(issueNumber: number, body: string): Promise<void> 
   try {
     await octokit.issues.createComment({ owner: OWNER, repo: REPO, issue_number: issueNumber, body })
   } catch (err) {
-    console.error(`[dispatch] Failed to comment on #${issueNumber}:`, err)
+    logError(`Failed to comment on #${issueNumber}`, err)
   }
 }
 
-// ─── SCHEMAS ─────────────────────────────────────────────────────────────────
+// ─── SCHEMAS ────────────────────────────────────────────────────────────────
 
 const triageIssueSchema = z.object({
   number: z.number(),
@@ -149,27 +162,30 @@ interface WaveResult {
   error?: string
 }
 
-// ─── STEP 1: FETCH ISSUES ───────────────────────────────────────────────────
+interface IssueLabel {
+  name?: string | undefined
+}
+
+// ─── STEP 1: FETCH ISSUES ──────────────────────────────────────────────────
 
 async function fetchIssues(): Promise<GitHubIssue[]> {
-  // Priority: ISSUE > LABEL > all open
   if (ISSUE) {
     const numbers = ISSUE.split(',').map(n => Number(n.trim())).filter(n => n > 0)
-    console.log(`[dispatch] Fetching specific issues: ${numbers.join(', ')}`)
+    log(`Fetching specific issues: ${numbers.join(', ')}`)
 
     const results = await Promise.all(
-      numbers.map(async (num) => {
+      numbers.map(async (num): Promise<GitHubIssue | null> => {
         try {
           const { data } = await octokit.issues.get({ owner: OWNER, repo: REPO, issue_number: num })
           return {
             number: data.number,
             title: data.title,
             body: data.body,
-            labels: data.labels.map((l: any) => typeof l === 'string' ? l : l.name ?? ''),
+            labels: (data.labels as IssueLabel[]).map(l => l.name ?? ''),
             state: data.state,
-          } satisfies GitHubIssue
+          }
         } catch (err) {
-          console.error(`[dispatch] Issue #${num} not found, skipping.`)
+          logError(`Issue #${num} not found, skipping`, err)
           return null
         }
       })
@@ -186,26 +202,30 @@ async function fetchIssues(): Promise<GitHubIssue[]> {
 
   if (LABEL) {
     params.labels = LABEL
-    console.log(`[dispatch] Fetching open issues with label: ${LABEL}`)
+    log(`Fetching open issues with label: ${LABEL}`)
   } else {
-    console.log(`[dispatch] Fetching all open issues`)
+    log('Fetching all open issues')
   }
 
-  const { data } = await octokit.issues.listForRepo(params)
+  try {
+    const { data } = await octokit.issues.listForRepo(params)
 
-  // Filter out pull requests (GitHub API returns PRs in issues endpoint)
-  return data
-    .filter((issue: any) => !issue.pull_request)
-    .map((issue: any) => ({
-      number: issue.number,
-      title: issue.title,
-      body: issue.body,
-      labels: issue.labels.map((l: any) => typeof l === 'string' ? l : l.name ?? ''),
-      state: issue.state,
-    }))
+    return data
+      .filter(issue => !('pull_request' in issue && issue.pull_request))
+      .map(issue => ({
+        number: issue.number,
+        title: issue.title,
+        body: issue.body ?? null,
+        labels: (issue.labels as IssueLabel[]).map(l => l.name ?? ''),
+        state: issue.state,
+      }))
+  } catch (err) {
+    logError('Failed to fetch issues', err)
+    throw err
+  }
 }
 
-// ─── STEP 2: TRIAGE WITH AI ─────────────────────────────────────────────────
+// ─── STEP 2: TRIAGE WITH AI ────────────────────────────────────────────────
 
 async function triageIssues(issues: GitHubIssue[]): Promise<TriageResult> {
   const triageModel = MODEL ? MODEL_MAP[MODEL] : DEFAULT_MODEL
@@ -237,6 +257,9 @@ Then build an execution plan with parallel waves:
 - Wave 2: Issues whose dependencies are all in wave 1
 - Wave N: Issues whose dependencies are all in waves < N
 
+Issues that depend on infeasible issues should also be marked as infeasible.
+Circular dependencies must be broken — pick the one with fewer dependents to go first.
+
 ISSUES:
 ${issuesSummary}
 
@@ -267,42 +290,86 @@ IMPORTANT: Only output the JSON, no markdown fences, no explanation.`
     systemPrompt: 'You are a precise JSON-outputting triage system. Output only valid JSON, nothing else.',
   })
 
-  console.log(`[dispatch] Triaging ${issues.length} issues with ${triageModel}...`)
+  log(`Triaging ${issues.length} issues with ${triageModel}...`)
 
-  const result = await agent.generate({ prompt: triagePrompt })
-  const text = typeof result === 'string' ? result : result?.text ?? result?.stdout ?? ''
+  try {
+    const result = await agent.generate({ prompt: triagePrompt })
+    const text = typeof result === 'string' ? result : (result?.text ?? '')
 
-  // Extract JSON from response (handle possible markdown fences)
-  const jsonMatch = text.match(/\{[\s\S]*\}/)
-  if (!jsonMatch) {
-    throw new Error(`[dispatch] Triage failed: no JSON in response.\nRaw output:\n${text.slice(0, 500)}`)
+    const jsonMatch = text.match(/\{[\s\S]*\}/)
+    if (!jsonMatch) {
+      throw new Error(`Triage failed: no JSON in response.\nRaw output:\n${text.slice(0, 500)}`)
+    }
+
+    const parsed: unknown = JSON.parse(jsonMatch[0])
+    const validated = triageSchema.parse(parsed)
+
+    // Validate wave plan: ensure every feasible issue is in exactly one wave
+    const feasibleNumbers = new Set(validated.issues.filter(i => i.feasible).map(i => i.number))
+    const wavePlannedNumbers = new Set(validated.executionPlan.flatMap(w => w.issues))
+
+    for (const num of feasibleNumbers) {
+      if (!wavePlannedNumbers.has(num)) {
+        // Auto-add missing feasible issues to wave 1
+        log(`Warning: feasible issue #${num} missing from execution plan, adding to wave 1`)
+        const wave1 = validated.executionPlan.find(w => w.wave === 1)
+        if (wave1) {
+          wave1.issues.push(num)
+        } else {
+          validated.executionPlan.unshift({ wave: 1, issues: [num], parallel: true })
+        }
+      }
+    }
+
+    // Validate dependency graph: check for circular dependencies
+    const issueMap = new Map(validated.issues.map(i => [i.number, i]))
+    for (const issue of validated.issues) {
+      if (!issue.feasible) continue
+      for (const dep of issue.dependencies) {
+        const depIssue = issueMap.get(dep)
+        if (depIssue && depIssue.dependencies.includes(issue.number)) {
+          throw new Error(
+            `Circular dependency detected between issues #${issue.number} and #${dep}. ` +
+            `The AI triage must resolve circular dependencies by breaking the cycle.`
+          )
+        }
+      }
+    }
+
+    // Sort execution plan by wave number
+    validated.executionPlan.sort((a, b) => a.wave - b.wave)
+
+    log('Triage complete:')
+    for (const issue of validated.issues) {
+      const status = issue.feasible
+        ? `-> ${issue.agent} (${issue.model.includes('opus') ? 'opus' : 'sonnet'})`
+        : `REJECTED: ${issue.rejectReason}`
+      log(`  #${issue.number} ${issue.title}: ${status}`)
+    }
+    for (const wave of validated.executionPlan) {
+      log(`  Wave ${wave.wave}: [${wave.issues.join(', ')}] (parallel: ${wave.parallel})`)
+    }
+
+    return validated
+  } catch (err) {
+    logError('Triage failed', err)
+    throw err
   }
-
-  const parsed = JSON.parse(jsonMatch[0])
-  const validated = triageSchema.parse(parsed)
-
-  console.log(`[dispatch] Triage complete:`)
-  for (const issue of validated.issues) {
-    const status = issue.feasible ? `→ ${issue.agent} (${issue.model.includes('opus') ? 'opus' : 'sonnet'})` : `✗ rejected: ${issue.rejectReason}`
-    console.log(`  #${issue.number} ${issue.title}: ${status}`)
-  }
-  for (const wave of validated.executionPlan) {
-    console.log(`  Wave ${wave.wave}: [${wave.issues.join(', ')}] (parallel: ${wave.parallel})`)
-  }
-
-  return validated
 }
 
-// ─── STEP 3: EXECUTE AGENT ON ISSUE ─────────────────────────────────────────
+// ─── STEP 3: EXECUTE AGENT ON ISSUE ────────────────────────────────────────
 
 async function executeAgentOnIssue(triaged: TriagedIssue, issue: GitHubIssue): Promise<WaveResult> {
   const branchName = `agent/issue-${triaged.number}`
   const agentModel = MODEL ? MODEL_MAP[MODEL] : triaged.model
 
-  console.log(`[dispatch] ▶ Starting ${triaged.agent} agent on #${triaged.number} (${agentModel})`)
+  log(`Starting ${triaged.agent} agent on #${triaged.number} (${agentModel})`)
 
   await setLabel(triaged.number, LABELS.IN_PROGRESS)
-  await commentOnIssue(triaged.number, `🤖 **Smithers Dispatch** — Agent \`${triaged.agent}\` starting work on this issue.\n\nBranch: \`${branchName}\`\nModel: \`${agentModel}\``)
+  await commentOnIssue(
+    triaged.number,
+    `**Smithers Dispatch** — Agent \`${triaged.agent}\` starting work on this issue.\n\nBranch: \`${branchName}\`\nModel: \`${agentModel}\``
+  )
 
   try {
     // Create branch from target BRANCH
@@ -311,9 +378,11 @@ async function executeAgentOnIssue(triaged: TriagedIssue, issue: GitHubIssue): P
 
     try {
       await octokit.git.createRef({ owner: OWNER, repo: REPO, ref: `refs/heads/${branchName}`, sha: baseSha })
+      log(`  Created branch ${branchName} from ${BRANCH} (${baseSha.slice(0, 7)})`)
     } catch {
-      // Branch might already exist — update it
+      // Branch might already exist — force update it
       await octokit.git.updateRef({ owner: OWNER, repo: REPO, ref: `heads/${branchName}`, sha: baseSha, force: true })
+      log(`  Updated existing branch ${branchName} to ${baseSha.slice(0, 7)}`)
     }
 
     // Build the agent prompt
@@ -334,11 +403,7 @@ INSTRUCTIONS:
 
 Focus on quality, correctness, and minimal scope. Only change what is needed.`
 
-    // Spawn agent as subprocess using Bun.spawn
-    const agentFactory = agentFactories[triaged.agent]
-    const agent = agentFactory(agentModel)
-
-    // Use ClaudeCodeAgent with cwd set to a clone, or run via Bun.spawn for isolation
+    // Spawn agent as subprocess using Bun.spawn for isolation
     const proc = Bun.spawn([
       'claude',
       '--print',
@@ -366,7 +431,7 @@ Focus on quality, correctness, and minimal scope. Only change what is needed.`
       throw new Error(`Agent exited with code ${exitCode}.\nSTDERR: ${stderr.slice(0, 1000)}`)
     }
 
-    console.log(`[dispatch] ✓ Agent ${triaged.agent} completed #${triaged.number}`)
+    log(`Agent ${triaged.agent} completed #${triaged.number} (${stdout.length} chars output)`)
 
     // Create PR from agent branch to target branch
     let prNumber: number | undefined
@@ -380,13 +445,13 @@ Focus on quality, correctness, and minimal scope. Only change what is needed.`
         base: BRANCH,
       })
       prNumber = pr.number
-      console.log(`[dispatch]   PR #${prNumber} created`)
-    } catch (err: any) {
-      // PR might already exist or no changes
-      if (err.message?.includes('No commits between')) {
-        console.log(`[dispatch]   No changes detected for #${triaged.number}, skipping PR`)
+      log(`  PR #${prNumber} created for #${triaged.number}`)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      if (message.includes('No commits between')) {
+        log(`  No changes detected for #${triaged.number}, skipping PR creation`)
       } else {
-        console.error(`[dispatch]   Failed to create PR for #${triaged.number}:`, err.message)
+        logError(`Failed to create PR for #${triaged.number}`, err)
       }
     }
 
@@ -394,26 +459,29 @@ Focus on quality, correctness, and minimal scope. Only change what is needed.`
     await setLabel(triaged.number, LABELS.TRIAGED)
 
     return { issueNumber: triaged.number, success: true, prNumber }
-  } catch (err: any) {
-    console.error(`[dispatch] ✗ Agent failed on #${triaged.number}:`, err.message)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    logError(`Agent failed on #${triaged.number}`, err)
 
     await removeLabel(triaged.number, LABELS.IN_PROGRESS)
     await setLabel(triaged.number, LABELS.ERROR)
-    await commentOnIssue(triaged.number, `❌ **Smithers Dispatch** — Agent \`${triaged.agent}\` failed.\n\nError: \`${err.message?.slice(0, 500)}\``)
+    await commentOnIssue(
+      triaged.number,
+      `**Smithers Dispatch** — Agent \`${triaged.agent}\` failed.\n\nError: \`${message.slice(0, 500)}\``
+    )
 
-    return { issueNumber: triaged.number, success: false, error: err.message }
+    return { issueNumber: triaged.number, success: false, error: message }
   }
 }
 
-// ─── STEP 4: REVIEW A PR ────────────────────────────────────────────────────
+// ─── STEP 4: REVIEW A PR ───────────────────────────────────────────────────
 
 async function reviewPR(prNumber: number, issueNumber: number): Promise<'approved' | 'rejected'> {
-  console.log(`[dispatch] 🔍 Reviewing PR #${prNumber} for issue #${issueNumber}`)
+  log(`Reviewing PR #${prNumber} for issue #${issueNumber}`)
 
   const reviewModel = MODEL ? MODEL_MAP[MODEL] : DEFAULT_MODEL
 
   try {
-    // Fetch PR diff
     const { data: diff } = await octokit.pulls.get({
       owner: OWNER,
       repo: REPO,
@@ -434,6 +502,7 @@ REVIEW CRITERIA:
 - Does the code correctly address the issue?
 - Are there bugs, security issues, or obvious problems?
 - Is the code quality acceptable?
+- Are there any breaking changes or regressions?
 
 RESPOND with EXACTLY one of:
 - "APPROVE" if the code looks good
@@ -456,46 +525,60 @@ Only output your verdict, nothing else.`
     })
 
     const stdout = await new Response(proc.stdout).text()
-    await proc.exited
+    const stderr = await new Response(proc.stderr).text()
+    const exitCode = await proc.exited
+
+    if (exitCode !== 0) {
+      logError(`Review process exited with code ${exitCode}`, new Error(stderr.slice(0, 500)))
+      return 'rejected'
+    }
 
     const verdict = stdout.trim()
 
     if (verdict.startsWith('APPROVE')) {
-      console.log(`[dispatch]   ✓ PR #${prNumber} approved`)
+      log(`  PR #${prNumber} approved`)
 
-      await octokit.pulls.createReview({
-        owner: OWNER,
-        repo: REPO,
-        pull_number: prNumber,
-        event: 'APPROVE',
-        body: '✅ Smithers review: APPROVED',
-      })
+      try {
+        await octokit.pulls.createReview({
+          owner: OWNER,
+          repo: REPO,
+          pull_number: prNumber,
+          event: 'APPROVE',
+          body: 'Smithers review: APPROVED',
+        })
+      } catch (err) {
+        logError(`Failed to post approval review on PR #${prNumber}`, err)
+      }
 
       return 'approved'
     }
 
     const reason = verdict.replace('REQUEST_CHANGES:', '').trim()
-    console.log(`[dispatch]   ✗ PR #${prNumber} needs changes: ${reason.slice(0, 100)}`)
+    log(`  PR #${prNumber} needs changes: ${reason.slice(0, 100)}`)
 
-    await octokit.pulls.createReview({
-      owner: OWNER,
-      repo: REPO,
-      pull_number: prNumber,
-      event: 'REQUEST_CHANGES',
-      body: `🔄 Smithers review: Changes requested.\n\n${reason}`,
-    })
+    try {
+      await octokit.pulls.createReview({
+        owner: OWNER,
+        repo: REPO,
+        pull_number: prNumber,
+        event: 'REQUEST_CHANGES',
+        body: `Smithers review: Changes requested.\n\n${reason}`,
+      })
+    } catch (err) {
+      logError(`Failed to post review on PR #${prNumber}`, err)
+    }
 
     return 'rejected'
-  } catch (err: any) {
-    console.error(`[dispatch]   Review failed for PR #${prNumber}:`, err.message)
+  } catch (err) {
+    logError(`Review failed for PR #${prNumber}`, err)
     return 'rejected'
   }
 }
 
-// ─── STEP 5: MERGE A PR ─────────────────────────────────────────────────────
+// ─── STEP 5: MERGE A PR ────────────────────────────────────────────────────
 
 async function mergePR(prNumber: number, issueNumber: number): Promise<boolean> {
-  console.log(`[dispatch] 🔀 Merging PR #${prNumber}`)
+  log(`Merging PR #${prNumber}`)
 
   try {
     await octokit.pulls.merge({
@@ -506,21 +589,26 @@ async function mergePR(prNumber: number, issueNumber: number): Promise<boolean> 
       commit_title: `fix: resolve #${issueNumber} [smithers]`,
     })
 
-    console.log(`[dispatch]   ✓ PR #${prNumber} merged`)
+    log(`  PR #${prNumber} merged successfully`)
     return true
-  } catch (err: any) {
-    console.error(`[dispatch]   ✗ Merge failed for PR #${prNumber}:`, err.message)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    logError(`Merge failed for PR #${prNumber}`, err)
 
-    if (err.message?.includes('merge conflict') || err.status === 405) {
+    const status = (err as { status?: number }).status
+    if (message.includes('merge conflict') || status === 405) {
       await setLabel(issueNumber, LABELS.MERGE_CONFLICT)
-      await commentOnIssue(issueNumber, `⚠️ **Smithers Dispatch** — Merge conflict on PR #${prNumber}. Manual resolution needed.`)
+      await commentOnIssue(
+        issueNumber,
+        `**Smithers Dispatch** — Merge conflict on PR #${prNumber}. Manual resolution needed.`
+      )
     }
 
     return false
   }
 }
 
-// ─── STEP 6: EXECUTE WAVES ──────────────────────────────────────────────────
+// ─── STEP 6: EXECUTE WAVES ─────────────────────────────────────────────────
 
 async function executeWaves(triage: TriageResult, issues: GitHubIssue[]): Promise<Map<number, WaveResult>> {
   const allResults = new Map<number, WaveResult>()
@@ -530,14 +618,21 @@ async function executeWaves(triage: TriageResult, issues: GitHubIssue[]): Promis
   // Handle rejected issues first
   for (const triaged of triage.issues) {
     if (!triaged.feasible) {
-      console.log(`[dispatch] ✗ Rejecting #${triaged.number}: ${triaged.rejectReason}`)
+      log(`Rejecting #${triaged.number}: ${triaged.rejectReason}`)
       await setLabel(triaged.number, LABELS.REJECTED)
-      await commentOnIssue(triaged.number, `🚫 **Smithers Dispatch** — Issue rejected by triage.\n\nReason: ${triaged.rejectReason ?? 'Not feasible for AI agent'}`)
-      allResults.set(triaged.number, { issueNumber: triaged.number, success: false, error: `Rejected: ${triaged.rejectReason}` })
+      await commentOnIssue(
+        triaged.number,
+        `**Smithers Dispatch** — Issue rejected by triage.\n\nReason: ${triaged.rejectReason ?? 'Not feasible for AI agent'}`
+      )
+      allResults.set(triaged.number, {
+        issueNumber: triaged.number,
+        success: false,
+        error: `Rejected: ${triaged.rejectReason}`,
+      })
     }
   }
 
-  // Execute each wave
+  // Execute each wave sequentially
   for (const wave of triage.executionPlan) {
     const waveIssueNumbers = wave.issues.filter(n => {
       const t = triagedMap.get(n)
@@ -545,22 +640,26 @@ async function executeWaves(triage: TriageResult, issues: GitHubIssue[]): Promis
     })
 
     if (waveIssueNumbers.length === 0) {
-      console.log(`[dispatch] Wave ${wave.wave}: no feasible issues, skipping`)
+      log(`Wave ${wave.wave}: no feasible issues, skipping`)
       continue
     }
 
-    console.log(`\n[dispatch] ═══════════════════════════════════════════`)
-    console.log(`[dispatch] WAVE ${wave.wave} — Issues: [${waveIssueNumbers.join(', ')}]`)
-    console.log(`[dispatch] ═══════════════════════════════════════════\n`)
+    log('===============================================')
+    log(`WAVE ${wave.wave} — Issues: [${waveIssueNumbers.join(', ')}]`)
+    log('===============================================')
 
     // Execute all issues in this wave in parallel
     const waveResults = await Promise.all(
       waveIssueNumbers.map(async (num) => {
-        const triaged = triagedMap.get(num)!
+        const triaged = triagedMap.get(num)
+        if (!triaged) {
+          logError(`Issue #${num} not found in triage results`)
+          return { issueNumber: num, success: false, error: 'Issue not found in triage' } satisfies WaveResult
+        }
         const issue = issueMap.get(num)
         if (!issue) {
-          console.error(`[dispatch] Issue #${num} not found in fetched issues`)
-          return { issueNumber: num, success: false, error: 'Issue not found' } as WaveResult
+          logError(`Issue #${num} not found in fetched issues`)
+          return { issueNumber: num, success: false, error: 'Issue not found' } satisfies WaveResult
         }
         return executeAgentOnIssue(triaged, issue)
       })
@@ -571,24 +670,35 @@ async function executeWaves(triage: TriageResult, issues: GitHubIssue[]): Promis
     }
 
     // Review PRs from this wave
-    console.log(`\n[dispatch] 🔍 Reviewing wave ${wave.wave} PRs...\n`)
+    log(`Reviewing wave ${wave.wave} PRs...`)
 
     for (const result of waveResults) {
       if (!result.success || !result.prNumber) continue
 
-      const verdict = await reviewPR(result.prNumber, result.issueNumber)
+      try {
+        const verdict = await reviewPR(result.prNumber, result.issueNumber)
 
-      if (verdict === 'approved') {
-        const merged = await mergePR(result.prNumber, result.issueNumber)
-        if (!merged) {
-          allResults.set(result.issueNumber, { ...result, success: false, error: 'Merge failed' })
+        if (verdict === 'approved') {
+          const merged = await mergePR(result.prNumber, result.issueNumber)
+          if (!merged) {
+            allResults.set(result.issueNumber, { ...result, success: false, error: 'Merge failed' })
+          }
+        } else {
+          await setLabel(result.issueNumber, LABELS.NEEDS_FIX)
+          await removeLabel(result.issueNumber, LABELS.TRIAGED)
+          await commentOnIssue(
+            result.issueNumber,
+            `**Smithers Dispatch** — Review of PR #${result.prNumber} requested changes. Label \`needs-fix\` added.`
+          )
+          allResults.set(result.issueNumber, { ...result, success: false, error: 'Review rejected' })
         }
-      } else {
-        // Review failed — label and continue
-        await setLabel(result.issueNumber, LABELS.NEEDS_FIX)
-        await removeLabel(result.issueNumber, LABELS.TRIAGED)
-        await commentOnIssue(result.issueNumber, `🔄 **Smithers Dispatch** — Review of PR #${result.prNumber} requested changes. Label \`needs-fix\` added.`)
-        allResults.set(result.issueNumber, { ...result, success: false, error: 'Review rejected' })
+      } catch (err) {
+        logError(`Review/merge pipeline failed for #${result.issueNumber}`, err)
+        allResults.set(result.issueNumber, {
+          ...result,
+          success: false,
+          error: `Review/merge error: ${err instanceof Error ? err.message : String(err)}`,
+        })
       }
     }
   }
@@ -596,12 +706,12 @@ async function executeWaves(triage: TriageResult, issues: GitHubIssue[]): Promis
   return allResults
 }
 
-// ─── STEP 7: REPORT ─────────────────────────────────────────────────────────
+// ─── STEP 7: REPORT ────────────────────────────────────────────────────────
 
 function printReport(results: Map<number, WaveResult>): void {
-  console.log(`\n[dispatch] ═══════════════════════════════════════════`)
-  console.log(`[dispatch] DISPATCH REPORT`)
-  console.log(`[dispatch] ═══════════════════════════════════════════\n`)
+  log('===============================================')
+  log('DISPATCH REPORT')
+  log('===============================================')
 
   const resolved: WaveResult[] = []
   const rejected: WaveResult[] = []
@@ -617,26 +727,26 @@ function printReport(results: Map<number, WaveResult>): void {
     }
   }
 
-  console.log(`  ✅ Resolved: ${resolved.length}`)
+  log(`Resolved: ${resolved.length}`)
   for (const r of resolved) {
-    console.log(`     #${r.issueNumber} → PR #${r.prNumber ?? '?'}`)
+    log(`  #${r.issueNumber} -> PR #${r.prNumber ?? '?'}`)
   }
 
-  console.log(`  🚫 Rejected: ${rejected.length}`)
+  log(`Rejected: ${rejected.length}`)
   for (const r of rejected) {
-    console.log(`     #${r.issueNumber}: ${r.error}`)
+    log(`  #${r.issueNumber}: ${r.error}`)
   }
 
-  console.log(`  ❌ Errored: ${errored.length}`)
+  log(`Errored: ${errored.length}`)
   for (const r of errored) {
-    console.log(`     #${r.issueNumber}: ${r.error}`)
+    log(`  #${r.issueNumber}: ${r.error}`)
   }
 
-  console.log(`\n  Total: ${results.size} issues processed`)
-  console.log(`[dispatch] ═══════════════════════════════════════════\n`)
+  log(`Total: ${results.size} issues processed`)
+  log('===============================================')
 }
 
-// ─── SMITHERS WORKFLOW ───────────────────────────────────────────────────────
+// ─── SMITHERS WORKFLOW ──────────────────────────────────────────────────────
 
 const fetchSchema = z.object({
   count: z.number(),
@@ -672,28 +782,32 @@ let triageResult: TriageResult | null = null
 export default smithers((ctx) => (
   <Workflow name="dispatch-v2">
     <Sequence>
-      {/* Step 1: Fetch issues */}
-      <Task id="fetch" output={outputs.fetch}>
+      {/* Step 1: Fetch issues from GitHub */}
+      <Task id="fetch-issues" output={outputs.fetch}>
         {async () => {
-          console.log(`[dispatch] ═══════════════════════════════════════════`)
-          console.log(`[dispatch] SMITHERS DISPATCH v2`)
-          console.log(`[dispatch] Repo: ${OWNER}/${REPO} → Branch: ${BRANCH}`)
-          console.log(`[dispatch] Mode: ${ISSUE ? `ISSUE=${ISSUE}` : LABEL ? `LABEL=${LABEL}` : 'ALL OPEN'}`)
-          console.log(`[dispatch] ═══════════════════════════════════════════\n`)
+          log('===============================================')
+          log('SMITHERS DISPATCH v2')
+          log(`Repo: ${OWNER}/${REPO} -> Branch: ${BRANCH}`)
+          log(`Mode: ${ISSUE ? `ISSUE=${ISSUE}` : LABEL ? `LABEL=${LABEL}` : 'ALL OPEN'}`)
+          log('===============================================')
 
-          await ensureLabelsExist()
+          try {
+            await ensureLabelsExist()
+          } catch (err) {
+            logError('Failed to ensure labels exist (continuing)', err)
+          }
+
           fetchedIssues = await fetchIssues()
 
           if (fetchedIssues.length === 0) {
-            console.log('[dispatch] No issues found. Done.')
+            log('No issues found. Done.')
             return { count: 0, issues: [] }
           }
 
-          console.log(`[dispatch] Found ${fetchedIssues.length} issues:\n`)
+          log(`Found ${fetchedIssues.length} issues:`)
           for (const i of fetchedIssues) {
-            console.log(`  #${i.number} — ${i.title} [${i.labels.join(', ') || 'no labels'}]`)
+            log(`  #${i.number} — ${i.title} [${i.labels.join(', ') || 'no labels'}]`)
           }
-          console.log()
 
           return {
             count: fetchedIssues.length,
@@ -703,7 +817,7 @@ export default smithers((ctx) => (
       </Task>
 
       {/* Step 2: AI triage */}
-      <Task id="triage" output={outputs.triage} skipIf={fetchedIssues.length === 0}>
+      <Task id="triage-issues" output={outputs.triage} skipIf={fetchedIssues.length === 0}>
         {async () => {
           triageResult = await triageIssues(fetchedIssues)
 
@@ -719,7 +833,7 @@ export default smithers((ctx) => (
       </Task>
 
       {/* Steps 3-6: Execute waves, review, merge */}
-      <Task id="execute" output={outputs.execute} skipIf={!triageResult}>
+      <Task id="execute-waves" output={outputs.execute} skipIf={!triageResult}>
         {async () => {
           if (!triageResult) {
             return { resolved: 0, rejected: 0, errored: 0, total: 0 }
@@ -728,7 +842,9 @@ export default smithers((ctx) => (
           const results = await executeWaves(triageResult, fetchedIssues)
           printReport(results)
 
-          let resolved = 0, rejected = 0, errored = 0
+          let resolved = 0
+          let rejected = 0
+          let errored = 0
           for (const r of results.values()) {
             if (r.success) resolved++
             else if (r.error?.startsWith('Rejected')) rejected++
