@@ -12,17 +12,17 @@ type AgentInstance = ReturnType<typeof frontendAgent>;
 // ---------------------------------------------------------------------------
 // Env vars
 // ---------------------------------------------------------------------------
-const OWNER = process.env.OWNER ?? "";
-const REPO = process.env.REPO ?? "";
-const BRANCH = process.env.BRANCH ?? "";
-const ISSUE = process.env.ISSUE; // single or comma-separated: "42" or "42,43,45"
-const LABEL = process.env.LABEL; // filter by label
-const MODEL = process.env.MODEL; // force model: "opus" | "sonnet"
+const OWNER = process.env.SMITHERS_OWNER ?? "";
+const REPO = process.env.SMITHERS_REPO ?? "";
+const BRANCH = process.env.SMITHERS_BRANCH ?? "";
+const ISSUE = process.env.SMITHERS_ISSUE; // single or comma-separated: "42" or "42,43,45"
+const LABEL = process.env.SMITHERS_LABEL; // filter by label
+const MODEL = process.env.SMITHERS_MODEL; // force model: "opus" | "sonnet"
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN ?? "";
 
 if (!OWNER || !REPO || !BRANCH || !GITHUB_TOKEN) {
   console.error(
-    "Usage: OWNER=<org> REPO=<repo> BRANCH=<target> GITHUB_TOKEN=<pat> bun run workflows/dispatch.tsx",
+    "Usage: SMITHERS_OWNER=<org> SMITHERS_REPO=<repo> SMITHERS_BRANCH=<target> GITHUB_TOKEN=<pat> bun run workflows/dispatch.tsx",
   );
   process.exit(1);
 }
