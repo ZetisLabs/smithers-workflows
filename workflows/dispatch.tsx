@@ -1,5 +1,4 @@
 import { createSmithers, Sequence, runWorkflow } from "smithers";
-import { ClaudeCodeAgent } from "smithers";
 import { Octokit } from "@octokit/rest";
 import { z } from "zod";
 import { frontendAgent } from "../agents/frontend";
@@ -7,6 +6,8 @@ import { backendAgent } from "../agents/backend";
 import { testingAgent } from "../agents/testing";
 import { reviewAgent } from "../agents/review";
 import { securityAgent } from "../agents/security";
+
+type AgentInstance = ReturnType<typeof frontendAgent>;
 
 // ---------------------------------------------------------------------------
 // Env vars
@@ -96,7 +97,7 @@ const { Workflow, Task, smithers, outputs } = createSmithers({
 // ---------------------------------------------------------------------------
 type AgentName = "frontend" | "backend" | "testing" | "review" | "security";
 
-const agentFactories: Record<AgentName, (model: string) => ClaudeCodeAgent> = {
+const agentFactories: Record<AgentName, (model: string) => AgentInstance> = {
   frontend: frontendAgent,
   backend: backendAgent,
   testing: testingAgent,
@@ -270,9 +271,17 @@ async function mergePR(prNumber: number): Promise<boolean> {
 // Core execution logic
 // ---------------------------------------------------------------------------
 async function triageIssues(issues: GHIssue[]): Promise<TriageOutput> {
-  const triageAgent = new ClaudeCodeAgent({
-    model: resolveModel("claude-sonnet-4-6"),
-    systemPrompt: `You are an intelligent issue triage system for ${OWNER}/${REPO}.
+  const triageAgent = reviewAgent(resolveModel("claude-sonnet-4-6"));
+
+  const issuesSummary = issues
+    .map(
+      (i) =>
+        `#${i.number} "${i.title}" [${i.labels.join(", ")}]\n${i.body ?? "(no body)"}`,
+    )
+    .join("\n\n---\n\n");
+
+  const response = await triageAgent.generate({
+    prompt: `You are an intelligent issue triage system for ${OWNER}/${REPO}.
 Analyze the provided GitHub issues and produce a structured execution plan.
 
 For each issue determine:
@@ -283,19 +292,9 @@ For each issue determine:
 
 Group independent issues into parallel waves. Issues that depend on others go in later waves.
 
-Respond with ONLY valid JSON matching the required schema. No markdown, no explanation.`,
-    yolo: true,
-  });
+Respond with ONLY valid JSON matching the required schema. No markdown, no explanation.
 
-  const issuesSummary = issues
-    .map(
-      (i) =>
-        `#${i.number} "${i.title}" [${i.labels.join(", ")}]\n${i.body ?? "(no body)"}`,
-    )
-    .join("\n\n---\n\n");
-
-  const response = await triageAgent.generate({
-    prompt: `Analyze these GitHub issues and produce a triage plan:\n\n${issuesSummary}`,
+Analyze these GitHub issues and produce a triage plan:\n\n${issuesSummary}`,
     outputSchema: triageSchema,
   });
 
@@ -443,7 +442,7 @@ const workflow = smithers((ctx) => {
     <Workflow name="issue-dispatch-v3">
       <Sequence>
         {/* Step 1: Fetch + Triage — runs as a computed Task */}
-        <Task id="triage" output={outputs.triage} agent={new ClaudeCodeAgent({ model: resolveModel("claude-sonnet-4-6"), yolo: true })}>
+        <Task id="triage" output={outputs.triage} agent={reviewAgent(resolveModel("claude-sonnet-4-6"))}>
           {async () => {
             console.log("[dispatch] Fetching issues…");
             const issues = await fetchIssues();
@@ -468,7 +467,7 @@ const workflow = smithers((ctx) => {
         </Task>
 
         {/* Step 2-3: Execute waves + Review — dynamic computed Task */}
-        <Task id="execute-and-review" output={outputs.report} agent={new ClaudeCodeAgent({ model: resolveModel("claude-sonnet-4-6"), yolo: true })}>
+        <Task id="execute-and-review" output={outputs.report} agent={reviewAgent(resolveModel("claude-sonnet-4-6"))}>
           {async () => {
             const triage: TriageOutput = ctx.output("triage", { nodeId: "triage" });
             const issues = await fetchIssues();
