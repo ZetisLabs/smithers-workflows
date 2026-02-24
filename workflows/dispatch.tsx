@@ -319,10 +319,16 @@ async function mergePR(prNumber: number): Promise<boolean> {
 async function triageIssues(issues: GHIssue[]): Promise<TriageOutput> {
   const triageAgent = reviewAgent(resolveModel("claude-sonnet-4-6"));
 
+  for (const i of issues) {
+    if (!i.body) {
+      console.warn(`Warning: Issue #${i.number} has no body, triaging from title only`);
+    }
+  }
+
   const issuesSummary = issues
     .map(
       (i) =>
-        `#${i.number} "${i.title}" [${i.labels.join(", ")}]\n${i.body ?? "(no body)"}`,
+        `#${i.number} "${i.title}" [${i.labels.join(", ")}]\n${i.body || `[No description provided. Triage based on title: "${i.title}"]`}`,
     )
     .join("\n\n---\n\n");
 
@@ -364,12 +370,16 @@ async function executeIssue(
     await gitCreateBranch(branchName, BRANCH);
 
     // Run the agent
+    if (!issue.body) {
+      console.warn(`Warning: Issue #${issue.number} has no body, triaging from title only`);
+    }
+    const issueBody = issue.body || `[No description provided. Triage based on title: "${issue.title}"]`;
     const prompt = `You are working on issue #${issue.number} for ${OWNER}/${REPO}.
 Branch: ${branchName} (based on ${BRANCH})
 
 Issue title: ${issue.title}
 Issue body:
-${issue.body ?? "(no body)"}
+${issueBody}
 
 Labels: ${issue.labels.join(", ")}
 
