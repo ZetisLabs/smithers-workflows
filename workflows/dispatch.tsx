@@ -18,6 +18,7 @@ const BRANCH = process.env.SMITHERS_BRANCH ?? "";
 const ISSUE = process.env.SMITHERS_ISSUE; // single or comma-separated: "42" or "42,43,45"
 const LABEL = process.env.SMITHERS_LABEL; // filter by label
 const MODEL = process.env.SMITHERS_MODEL; // force model: "opus" | "sonnet"
+const MAX_CONCURRENCY = Number(process.env.SMITHERS_MAX_CONCURRENCY ?? "3");
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN ?? "";
 
 if (!OWNER || !REPO || !BRANCH || !GITHUB_TOKEN) {
@@ -49,6 +50,29 @@ async function retryWithBackoff<T>(fn: () => Promise<T>, retries = 3): Promise<T
     }
   }
   throw new Error("retryWithBackoff: exhausted retries");
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency pool
+// ---------------------------------------------------------------------------
+async function runWithConcurrency<T>(
+  tasks: (() => Promise<T>)[],
+  limit: number,
+): Promise<T[]> {
+  const results: T[] = new Array(tasks.length);
+  let index = 0;
+  async function worker() {
+    while (index < tasks.length) {
+      const i = index++;
+      results[i] = await tasks[i]();
+    }
+  }
+  const workers = Array.from(
+    { length: Math.min(limit, tasks.length) },
+    () => worker(),
+  );
+  await Promise.all(workers);
+  return results;
 }
 
 // ---------------------------------------------------------------------------
@@ -519,8 +543,8 @@ const workflow = smithers((ctx) => {
                 return t?.feasible;
               });
 
-              const agentResults: AgentResult[] = await Promise.all(
-                feasibleInWave.map(async (num) => {
+              const agentResults: AgentResult[] = await runWithConcurrency(
+                feasibleInWave.map((num) => async () => {
                   const issue = issueMap.get(num);
                   const triageInfo = triage.issues.find((i) => i.number === num)!;
                   if (!issue) {
@@ -533,12 +557,14 @@ const workflow = smithers((ctx) => {
                   }
                   return executeIssue(issue, triageInfo);
                 }),
+                MAX_CONCURRENCY,
               );
 
               // Review each PR from this wave
               console.log(`[dispatch] Reviewing wave ${wave.wave} PRs…`);
-              const reviewResults: ReviewResult[] = await Promise.all(
-                agentResults.map((r) => reviewPR(r)),
+              const reviewResults: ReviewResult[] = await runWithConcurrency(
+                agentResults.map((r) => () => reviewPR(r)),
+                MAX_CONCURRENCY,
               );
 
               // Categorize results
