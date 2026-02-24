@@ -18,11 +18,10 @@ const ISSUE = process.env.ISSUE; // single or comma-separated: "42" or "42,43,45
 const LABEL = process.env.LABEL; // filter by label
 const MODEL = process.env.MODEL; // force model: "opus" | "sonnet"
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN ?? "";
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY ?? "";
 
-if (!OWNER || !REPO || !BRANCH || !GITHUB_TOKEN || !ANTHROPIC_API_KEY) {
+if (!OWNER || !REPO || !BRANCH || !GITHUB_TOKEN) {
   console.error(
-    "Usage: OWNER=<org> REPO=<repo> BRANCH=<target> GITHUB_TOKEN=<pat> ANTHROPIC_API_KEY=<key> bun run workflows/dispatch.tsx",
+    "Usage: OWNER=<org> REPO=<repo> BRANCH=<target> GITHUB_TOKEN=<pat> bun run workflows/dispatch.tsx",
   );
   process.exit(1);
 }
@@ -106,8 +105,8 @@ const agentFactories: Record<AgentName, (model: string) => ClaudeCodeAgent> = {
 };
 
 function resolveModel(issueModel: string): string {
-  if (MODEL === "opus") return "claude-opus-4-20250514";
-  if (MODEL === "sonnet") return "claude-sonnet-4-20250514";
+  if (MODEL === "opus") return "claude-opus-4-6";
+  if (MODEL === "sonnet") return "claude-sonnet-4-6";
   return issueModel;
 }
 
@@ -272,7 +271,7 @@ async function mergePR(prNumber: number): Promise<boolean> {
 // ---------------------------------------------------------------------------
 async function triageIssues(issues: GHIssue[]): Promise<TriageOutput> {
   const triageAgent = new ClaudeCodeAgent({
-    model: resolveModel("claude-sonnet-4-20250514"),
+    model: resolveModel("claude-sonnet-4-6"),
     systemPrompt: `You are an intelligent issue triage system for ${OWNER}/${REPO}.
 Analyze the provided GitHub issues and produce a structured execution plan.
 
@@ -444,7 +443,7 @@ const workflow = smithers((ctx) => {
     <Workflow name="issue-dispatch-v3">
       <Sequence>
         {/* Step 1: Fetch + Triage — runs as a computed Task */}
-        <Task id="triage" output={outputs.triage} agent={new ClaudeCodeAgent({ model: resolveModel("claude-sonnet-4-20250514"), yolo: true })}>
+        <Task id="triage" output={outputs.triage} agent={new ClaudeCodeAgent({ model: resolveModel("claude-sonnet-4-6"), yolo: true })}>
           {async () => {
             console.log("[dispatch] Fetching issues…");
             const issues = await fetchIssues();
@@ -469,7 +468,7 @@ const workflow = smithers((ctx) => {
         </Task>
 
         {/* Step 2-3: Execute waves + Review — dynamic computed Task */}
-        <Task id="execute-and-review" output={outputs.report} agent={new ClaudeCodeAgent({ model: resolveModel("claude-sonnet-4-20250514"), yolo: true })}>
+        <Task id="execute-and-review" output={outputs.report} agent={new ClaudeCodeAgent({ model: resolveModel("claude-sonnet-4-6"), yolo: true })}>
           {async () => {
             const triage: TriageOutput = ctx.output("triage", { nodeId: "triage" });
             const issues = await fetchIssues();
