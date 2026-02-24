@@ -30,6 +30,28 @@ if (!OWNER || !REPO || !BRANCH || !GITHUB_TOKEN) {
 const octokit = new Octokit({ auth: GITHUB_TOKEN });
 
 // ---------------------------------------------------------------------------
+// Rate-limit retry helper
+// ---------------------------------------------------------------------------
+async function retryWithBackoff<T>(fn: () => Promise<T>, retries = 3): Promise<T> {
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      return await fn();
+    } catch (err: unknown) {
+      const status = (err as { status?: number })?.status
+        ?? (err as { response?: { status?: number } })?.response?.status;
+      if ((status === 403 || status === 429) && attempt < retries - 1) {
+        const delay = 1000 * 2 ** attempt;
+        console.warn(`Rate limited (HTTP ${status}), retrying in ${delay}ms… (attempt ${attempt + 1}/${retries})`);
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error("retryWithBackoff: exhausted retries");
+}
+
+// ---------------------------------------------------------------------------
 // Schemas
 // ---------------------------------------------------------------------------
 const triageSchema = z.object({
@@ -126,11 +148,11 @@ async function fetchIssues(): Promise<GHIssue[]> {
     const numbers = ISSUE.split(",").map((n) => Number(n.trim()));
     const results = await Promise.all(
       numbers.map(async (num) => {
-        const { data } = await octokit.issues.get({
+        const { data } = await retryWithBackoff(() => octokit.issues.get({
           owner: OWNER,
           repo: REPO,
           issue_number: num,
-        });
+        }));
         return {
           number: data.number,
           title: data.title,
@@ -152,7 +174,7 @@ async function fetchIssues(): Promise<GHIssue[]> {
   };
   if (LABEL) params.labels = LABEL;
 
-  const { data } = await octokit.issues.listForRepo(params);
+  const { data } = await retryWithBackoff(() => octokit.issues.listForRepo(params));
   return data
     .filter((i) => !i.pull_request) // exclude PRs
     .map((i) => ({
@@ -172,23 +194,23 @@ async function setLabels(
 ): Promise<void> {
   for (const label of remove) {
     try {
-      await octokit.issues.removeLabel({
+      await retryWithBackoff(() => octokit.issues.removeLabel({
         owner: OWNER,
         repo: REPO,
         issue_number: issueNumber,
         name: label,
-      });
+      }));
     } catch {
       /* label may not exist */
     }
   }
   if (add.length > 0) {
-    await octokit.issues.addLabels({
+    await retryWithBackoff(() => octokit.issues.addLabels({
       owner: OWNER,
       repo: REPO,
       issue_number: issueNumber,
       labels: add,
-    });
+    }));
   }
 }
 
@@ -196,12 +218,12 @@ async function commentOnIssue(
   issueNumber: number,
   body: string,
 ): Promise<void> {
-  await octokit.issues.createComment({
+  await retryWithBackoff(() => octokit.issues.createComment({
     owner: OWNER,
     repo: REPO,
     issue_number: issueNumber,
     body,
-  });
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -242,25 +264,25 @@ async function createPR(
   title: string,
   body: string,
 ): Promise<number> {
-  const { data } = await octokit.pulls.create({
+  const { data } = await retryWithBackoff(() => octokit.pulls.create({
     owner: OWNER,
     repo: REPO,
     head: branchName,
     base: BRANCH,
     title,
     body,
-  });
+  }));
   return data.number;
 }
 
 async function mergePR(prNumber: number): Promise<boolean> {
   try {
-    await octokit.pulls.merge({
+    await retryWithBackoff(() => octokit.pulls.merge({
       owner: OWNER,
       repo: REPO,
       pull_number: prNumber,
       merge_method: "squash",
-    });
+    }));
     return true;
   } catch {
     return false;
@@ -383,12 +405,12 @@ async function reviewPR(result: AgentResult): Promise<ReviewResult> {
   const reviewer = reviewAgent(resolveModel("claude-sonnet-4-20250514"));
 
   try {
-    const { data: diff } = await octokit.pulls.get({
+    const { data: diff } = await retryWithBackoff(() => octokit.pulls.get({
       owner: OWNER,
       repo: REPO,
       pull_number: result.prNumber,
       mediaType: { format: "diff" },
-    });
+    }));
 
     const response = await reviewer.generate({
       prompt: `Review PR #${result.prNumber} for ${OWNER}/${REPO}.
