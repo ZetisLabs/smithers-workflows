@@ -11,5 +11,5 @@
     "rootDir": ".",
     "types": ["bun"]
   },
-  "include": ["agents/**/*.tsx", "workflows/**/*.tsx"]
+  "include": ["agents/**/*.ts", "agents/**/*.tsx", "workflows/**/*.ts", "workflows/**/*.tsx"]
 }
