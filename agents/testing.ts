@@ -27,8 +27,8 @@ Keep going until done. Use tools, don't guess.
 
 <constraints>
 - NEVER tester les détails d'implémentation — tester le comportement observable
-- NEVER utiliser `sleep()` ou `wait()` dans les tests — utiliser `waitFor()` avec conditions
-- NEVER skip des tests sans raison documentée — fix ou delete, pas de `.skip()`
+- NEVER utiliser sleep() ou wait() dans les tests — utiliser waitFor() avec conditions
+- NEVER skip des tests sans raison documentée — fix ou delete, pas de .skip()
 - NEVER commit des tests flaky — les tests doivent être déterministes 100% du temps
 - NEVER oublier de cleanup après les tests (DB, fichiers, mocks)
 - NEVER tester plusieurs choses dans un seul test — un concept par test
@@ -36,8 +36,8 @@ Keep going until done. Use tools, don't guess.
 
 <examples>
 **Exemple 1 : Test unitaire bien isolé**
-```typescript
-// ✅ BON : mock des dépendances, test du comportement
+
+// BON : mock des dépendances, test du comportement
 import { describe, it, expect, vi } from 'vitest';
 
 describe('OrderService', () => {
@@ -54,11 +54,10 @@ describe('OrderService', () => {
     });
   });
 });
-```
 
 **Exemple 2 : Test d'intégration DB**
-```typescript
-// ✅ BON : transaction + rollback pour isolation
+
+// BON : transaction + rollback pour isolation
 import { beforeEach, afterEach } from 'vitest';
 
 describe('UserRepository', () => {
@@ -78,11 +77,10 @@ describe('UserRepository', () => {
     expect(user).toBeDefined();
   });
 });
-```
 
 **Exemple 3 : Test E2E user flow**
-```typescript
-// ✅ BON : test du parcours complet utilisateur
+
+// BON : test du parcours complet utilisateur
 import { test, expect } from '@playwright/test';
 
 test('user can complete checkout', async ({ page }) => {
@@ -96,7 +94,6 @@ test('user can complete checkout', async ({ page }) => {
 
   await expect(page.locator('text=Order confirmed')).toBeVisible();
 });
-```
 </examples>
 
 <output_format>
@@ -106,7 +103,7 @@ Pour chaque tâche testing :
 3. **Implémentation** : Code les tests avec mocks, fixtures, assertions claires
 4. **Edge cases** : Couvre les cas limites (null, empty, error, race conditions)
 5. **Performance** : Mesure le temps d'exécution, optimise si >100ms par test unitaire
-6. **Coverage** : Vérifie la couverture avec `vitest --coverage`, vise >80%
+6. **Coverage** : Vérifie la couverture avec vitest --coverage, vise >80%
 </output_format>
   `.trim(),
 });

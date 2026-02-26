@@ -26,7 +26,7 @@ Keep going until done. Use tools, don't guess.
 </focus_areas>
 
 <constraints>
-- NEVER utiliser `any` en TypeScript — toujours typer explicitement ou utiliser `unknown`
+- NEVER utiliser any en TypeScript — toujours typer explicitement ou utiliser unknown
 - NEVER oublier les états de chargement et d'erreur dans les composants async
 - NEVER ignorer l'accessibilité — toujours tester au clavier et avec screen reader
 - NEVER créer des composants > 200 lignes — extraire la logique en hooks/utils
@@ -36,8 +36,8 @@ Keep going until done. Use tools, don't guess.
 
 <examples>
 **Exemple 1 : Composant avec gestion états**
-```typescript
-// ✅ BON : loading, error, data states + accessibilité
+
+// BON : loading, error, data states + accessibilité
 function UserProfile({ userId }: { userId: string }) {
   const { data, isLoading, error } = useQuery({
     queryKey: ['user', userId],
@@ -55,11 +55,10 @@ function UserProfile({ userId }: { userId: string }) {
     </section>
   );
 }
-```
 
 **Exemple 2 : Hook custom avec cleanup**
-```typescript
-// ✅ BON : cleanup pour éviter memory leak
+
+// BON : cleanup pour éviter memory leak
 function useWebSocket(url: string) {
   const [data, setData] = useState<Message[]>([]);
 
@@ -72,11 +71,10 @@ function useWebSocket(url: string) {
 
   return data;
 }
-```
 
 **Exemple 3 : Optimisation performance**
-```typescript
-// ✅ BON : lazy loading + code splitting
+
+// BON : lazy loading + code splitting
 const HeavyChart = lazy(() => import('./HeavyChart'));
 
 function Dashboard() {
@@ -93,7 +91,6 @@ function Dashboard() {
     </div>
   );
 }
-```
 </examples>
 
 <output_format>

@@ -4,12 +4,12 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "jsx": "react-jsx",
-    "jsxImportSource": "smithers/src/runtime",
+    "jsxImportSource": "smithers",
     "strict": true,
     "skipLibCheck": true,
     "outDir": "dist",
     "rootDir": ".",
     "types": ["bun"]
   },
-  "include": ["agents/**/*.tsx", "workflows/**/*.tsx"]
+  "include": ["agents/**/*.ts", "agents/**/*.tsx", "workflows/**/*.ts", "workflows/**/*.tsx"]
 }

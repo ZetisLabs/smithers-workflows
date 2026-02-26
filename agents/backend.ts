@@ -36,8 +36,8 @@ Keep going until done. Use tools, don't guess.
 
 <examples>
 **Exemple 1 : Endpoint API avec validation**
-```typescript
-// ✅ BON : validation Zod + gestion erreurs
+
+// BON : validation Zod + gestion erreurs
 import { z } from 'zod';
 
 const CreateUserSchema = z.object({
@@ -53,38 +53,35 @@ app.post('/users', async (req, res) => {
   const user = await createUser(result.data);
   res.status(201).json({ id: user.id });
 });
-```
 
 **Exemple 2 : Query optimisée avec index**
-```sql
--- ✅ BON : index composite pour requête fréquente
+
+-- BON : index composite pour requête fréquente
 CREATE INDEX idx_orders_user_status ON orders(user_id, status, created_at DESC);
 
 SELECT * FROM orders
 WHERE user_id = $1 AND status = 'pending'
 ORDER BY created_at DESC
 LIMIT 20;
-```
 
 **Exemple 3 : Caching stratégique**
-```typescript
-// ✅ BON : cache Redis avec TTL + invalidation
+
+// BON : cache Redis avec TTL + invalidation
 async function getProduct(id: string) {
-  const cached = await redis.get(`product:${id}`);
+  const cached = await redis.get("product:" + id);
   if (cached) return JSON.parse(cached);
 
   const product = await db.product.findUnique({ where: { id } });
-  await redis.setex(`product:${id}`, 3600, JSON.stringify(product));
+  await redis.setex("product:" + id, 3600, JSON.stringify(product));
   return product;
 }
 
 // Invalidation lors de la mise à jour
 async function updateProduct(id: string, data: any) {
   const product = await db.product.update({ where: { id }, data });
-  await redis.del(`product:${id}`);
+  await redis.del("product:" + id);
   return product;
 }
-```
 </examples>
 
 <output_format>
