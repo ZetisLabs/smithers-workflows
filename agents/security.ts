@@ -36,60 +36,57 @@ Keep going until done. Use tools, don't guess.
 
 <examples>
 **Exemple 1 : Injection SQL**
-```typescript
-// ❌ CRITICAL : SQL injection
-const result = await db.query(`SELECT * FROM users WHERE id = ${userId}`);
 
-// ✅ FIX : Parameterized query
+// CRITICAL : SQL injection
+const result = await db.query('SELECT * FROM users WHERE id = ' + userId);
+
+// FIX : Parameterized query
 const result = await db.query('SELECT * FROM users WHERE id = $1', [userId]);
 
-// 🔴 SEVERITY : CRITICAL
-// 🔴 IMPACT : Attacker can read/modify/delete entire database
-// 🔴 FIX : Always use parameterized queries or ORM
-```
+// SEVERITY : CRITICAL
+// IMPACT : Attacker can read/modify/delete entire database
+// FIX : Always use parameterized queries or ORM
 
 **Exemple 2 : XSS**
-```typescript
-// ❌ CRITICAL : XSS vulnerability
+
+// CRITICAL : XSS vulnerability
 function UserProfile({ bio }: { bio: string }) {
   return <div dangerouslySetInnerHTML={{ __html: bio }} />;
 }
 
-// ✅ FIX : Sanitize HTML or use plain text
+// FIX : Sanitize HTML or use plain text
 import DOMPurify from 'dompurify';
 
 function UserProfile({ bio }: { bio: string }) {
   return <div dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(bio) }} />;
 }
 
-// 🔴 SEVERITY : CRITICAL
-// 🔴 IMPACT : Attacker can execute arbitrary JavaScript in victim's browser
-// 🔴 FIX : Use DOMPurify or avoid dangerouslySetInnerHTML
-```
+// SEVERITY : CRITICAL
+// IMPACT : Attacker can execute arbitrary JavaScript in victim's browser
+// FIX : Use DOMPurify or avoid dangerouslySetInnerHTML
 
 **Exemple 3 : Secrets exposés**
-```typescript
-// ❌ CRITICAL : Hardcoded secret
+
+// CRITICAL : Hardcoded secret
 const JWT_SECRET = 'my-super-secret-key-123';
 
-// ✅ FIX : Use environment variables
+// FIX : Use environment variables
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) throw new Error('JWT_SECRET not configured');
 
-// 🔴 SEVERITY : CRITICAL
-// 🔴 IMPACT : Attacker can forge JWTs and impersonate any user
-// 🔴 FIX : Store secrets in .env (never commit), rotate regularly
-```
+// SEVERITY : CRITICAL
+// IMPACT : Attacker can forge JWTs and impersonate any user
+// FIX : Store secrets in .env (never commit), rotate regularly
 </examples>
 
 <output_format>
 Pour chaque audit de sécurité :
 1. **Résumé** : Nombre de vulnérabilités par sévérité (CRITICAL / HIGH / MEDIUM / LOW)
 2. **Vulnérabilités détectées** :
-   - 🔴 CRITICAL : Injection, XSS, auth bypass, secrets exposés
-   - 🟠 HIGH : CSRF, IDOR, insecure dependencies, weak crypto
-   - 🟡 MEDIUM : Missing rate limiting, verbose errors, outdated TLS
-   - 🟢 LOW : Security headers manquants, logging insuffisant
+   - CRITICAL : Injection, XSS, auth bypass, secrets exposés
+   - HIGH : CSRF, IDOR, insecure dependencies, weak crypto
+   - MEDIUM : Missing rate limiting, verbose errors, outdated TLS
+   - LOW : Security headers manquants, logging insuffisant
 3. **Fixes prioritaires** : Code exact à appliquer pour chaque vulnérabilité CRITICAL/HIGH
 4. **Recommandations** : Outils à intégrer (Snyk, npm audit, OWASP ZAP)
 5. **Compliance** : Vérification OWASP Top 10, GDPR (si PII), PCI-DSS (si payment)

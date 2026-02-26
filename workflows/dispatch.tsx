@@ -3,6 +3,7 @@ import {
   Sequence,
   Parallel,
   Worktree,
+  Ralph,
   ClaudeCodeAgent,
   runWorkflow,
 } from 'smithers';
@@ -21,7 +22,7 @@ const OWNER = process.env.SMITHERS_OWNER ?? process.env.OWNER ?? 'ZetisLabs';
 const REPO = process.env.SMITHERS_REPO ?? process.env.REPO ?? '';
 const GITHUB_TOKEN = process.env.SMITHERS_GITHUB_TOKEN ?? process.env.GITHUB_TOKEN ?? '';
 const MAX_CONCURRENCY = Number(process.env.SMITHERS_MAX_CONCURRENCY ?? '3');
-const BASE_BRANCH = process.env.SMITHERS_BRANCH ?? 'main';
+const BASE_BRANCH = process.env.SMITHERS_BRANCH ?? process.env.BRANCH ?? 'main';
 
 if (!REPO) {
   console.error('Usage: SMITHERS_OWNER=<owner> SMITHERS_REPO=<repo> bun run workflows/dispatch.tsx');
@@ -112,11 +113,28 @@ const agentFactories: Record<string, (model: string) => ClaudeCodeAgent> = {
 
 // ── Review agent ────────────────────────────────────────────────────────────
 
+const MAX_FIX_ITERATIONS = Number(process.env.SMITHERS_MAX_FIX_ITERATIONS ?? '3');
+
 const prReviewAgent = new ClaudeCodeAgent({
   model: resolveModel('claude-sonnet-4-6'),
   systemPrompt: `You are a code reviewer. Review the PR diff and determine if it should be approved or needs changes.
+
+IMPORTANT — Approval criteria:
+Only set approved=false (REQUEST_CHANGES) for BLOCKER issues:
+- Security vulnerabilities (injection, XSS, auth bypass, secrets exposed)
+- Data loss or corruption risks
+- Breaking changes without migration path
+- Critical bugs that would crash or corrupt data in production
+- Missing error handling on critical paths (payments, auth, data writes)
+
+For everything else (code style, naming, minor refactoring, non-critical performance, suggestions):
+- Set approved=true
+- Include these as suggestions in the feedback field
+
+In your feedback, clearly list each BLOCKER with a short description and the file/line if possible.
+Keep feedback actionable — the agent will use it to fix the code automatically.
+
 Respond with structured JSON matching the provided schema.
-Focus on: correctness, security issues, code quality, test coverage.
 Be concise but thorough.`,
 });
 
@@ -236,6 +254,8 @@ function buildIssuesSummary(issues: Array<{ number: number; title: string; body:
 
 // ── Workflow ─────────────────────────────────────────────────────────────────
 
+console.log(`Config: owner=${OWNER} repo=${REPO} base_branch=${BASE_BRANCH} max_concurrency=${MAX_CONCURRENCY}`);
+
 const issues = await fetchOpenIssues();
 const issuesSummary = buildIssuesSummary(issues);
 
@@ -302,15 +322,43 @@ ${issuesSummary}`}
                     branch={branch}
                   >
                     <Sequence>
-                      {/* Agent implements the fix */}
-                      <Task
-                        id={`impl-${num}`}
-                        output={outputs.agentResult}
-                        agent={agentFactories[info.agent](resolveModel(info.model))}
-                        retries={1}
-                        continueOnFail
+                      {/* ── Ralph loop: impl → push → review, retry on blockers ── */}
+                      <Ralph
+                        until={!!ctx.outputMaybe("reviewResult", { nodeId: `review-${num}` })?.approved}
+                        maxIterations={MAX_FIX_ITERATIONS}
                       >
-                        {`Fix issue #${num} in repo ${OWNER}/${REPO}.
+                        <Sequence>
+                          {/* Agent implements the fix (or fixes blockers on retry) */}
+                          <Task
+                            id={`impl-${num}`}
+                            output={outputs.agentResult}
+                            agent={agentFactories[info.agent](resolveModel(info.model))}
+                            retries={1}
+                            continueOnFail
+                          >
+                            {(() => {
+                              const prevReview = ctx.outputMaybe("reviewResult", { nodeId: `review-${num}` });
+                              const prevPush = ctx.outputMaybe("agentResult", { nodeId: `push-${num}` });
+
+                              // Retry: fix blockers from previous review
+                              if (prevReview && !prevReview.approved) {
+                                return `Fix the BLOCKER issues found during code review of PR #${prevPush?.prNumber ?? '?'} for issue #${num} in ${OWNER}/${REPO}.
+
+Issue title: ${info.title}
+
+REVIEW FEEDBACK (fix ONLY the blockers listed below):
+${prevReview.feedback}
+
+Instructions:
+- Read the review feedback carefully.
+- Fix ONLY the BLOCKER issues mentioned above.
+- Do NOT refactor or change anything else.
+- Run existing tests if available to verify the fix.
+- Keep changes minimal and focused.`;
+                              }
+
+                              // First iteration: original prompt
+                              return `Fix issue #${num} in repo ${OWNER}/${REPO}.
 
 Title: ${info.title}
 Labels: ${info.labels.join(', ')}
@@ -322,63 +370,87 @@ Instructions:
 - Read the relevant code and understand the issue fully before making changes.
 - Make minimal, focused changes to fix the issue.
 - Run existing tests if available to verify the fix.
-- Do NOT modify unrelated code.`}
-                      </Task>
+- Do NOT modify unrelated code.`;
+                            })()}
+                          </Task>
 
-                      {/* Push + PR (compute) */}
-                      <Task id={`push-${num}`} output={outputs.agentResult} continueOnFail>
-                        {async () => {
-                          const implResult = ctx.outputMaybe("agentResult", { nodeId: `impl-${num}` });
-                          if (!implResult || implResult.status === 'error') {
-                            await setLabels(num, ['error'], ['in-progress']);
-                            return {
-                              issueNumber: num,
-                              branch: '',
-                              status: 'error' as const,
-                              summary: 'Implementation failed',
-                            };
-                          }
-                          try {
-                            await gitPushBranch(branch);
-                            const prNumber = await createPR(branch, num, info.title);
-                            await setLabels(num, ['triaged'], ['in-progress']);
-                            return {
-                              issueNumber: num,
-                              branch,
-                              prNumber,
-                              status: 'success' as const,
-                              summary: `PR #${prNumber} created`,
-                            };
-                          } catch (err) {
-                            await setLabels(num, ['error'], ['in-progress']);
-                            return {
-                              issueNumber: num,
-                              branch,
-                              status: 'error' as const,
-                              summary: `Push/PR failed: ${err instanceof Error ? err.message : String(err)}`,
-                            };
-                          }
-                        }}
-                      </Task>
+                          {/* Push + PR (compute) — creates PR on first pass, pushes fixes on retry */}
+                          <Task id={`push-${num}`} output={outputs.agentResult} continueOnFail>
+                            {async () => {
+                              const implResult = ctx.outputMaybe("agentResult", { nodeId: `impl-${num}` });
+                              if (!implResult || implResult.status === 'error') {
+                                await setLabels(num, ['error'], ['in-progress']);
+                                return {
+                                  issueNumber: num,
+                                  branch: '',
+                                  status: 'error' as const,
+                                  summary: 'Implementation failed',
+                                };
+                              }
 
-                      {/* Review the PR */}
-                      <Task
-                        id={`review-${num}`}
-                        output={outputs.reviewResult}
-                        agent={prReviewAgent}
-                        continueOnFail
-                        skipIf={!ctx.outputMaybe("agentResult", { nodeId: `push-${num}` })?.prNumber}
-                      >
-                        {(() => {
-                          const pushResult = ctx.outputMaybe("agentResult", { nodeId: `push-${num}` });
-                          const prNum = pushResult?.prNumber ?? 0;
-                          return `Review PR #${prNum} for issue #${num} in ${OWNER}/${REPO}.
+                              const prevPush = ctx.outputMaybe("agentResult", { nodeId: `push-${num}` });
+                              const existingPR = prevPush?.prNumber;
+
+                              try {
+                                await gitPushBranch(branch);
+
+                                if (existingPR) {
+                                  // PR already exists from previous iteration — just pushed new commits
+                                  return {
+                                    issueNumber: num,
+                                    branch,
+                                    prNumber: existingPR,
+                                    status: 'success' as const,
+                                    summary: `Pushed fixes to existing PR #${existingPR}`,
+                                  };
+                                }
+
+                                const prNumber = await createPR(branch, num, info.title);
+                                await setLabels(num, ['triaged'], ['in-progress']);
+                                return {
+                                  issueNumber: num,
+                                  branch,
+                                  prNumber,
+                                  status: 'success' as const,
+                                  summary: `PR #${prNumber} created`,
+                                };
+                              } catch (err) {
+                                await setLabels(num, ['error'], ['in-progress']);
+                                return {
+                                  issueNumber: num,
+                                  branch,
+                                  prNumber: existingPR,
+                                  status: 'error' as const,
+                                  summary: `Push failed: ${err instanceof Error ? err.message : String(err)}`,
+                                };
+                              }
+                            }}
+                          </Task>
+
+                          {/* Review the PR — only blocks on BLOCKER/CRITICAL */}
+                          <Task
+                            id={`review-${num}`}
+                            output={outputs.reviewResult}
+                            agent={prReviewAgent}
+                            continueOnFail
+                            skipIf={!ctx.outputMaybe("agentResult", { nodeId: `push-${num}` })?.prNumber}
+                          >
+                            {(() => {
+                              const pushResult = ctx.outputMaybe("agentResult", { nodeId: `push-${num}` });
+                              const prNum = pushResult?.prNumber ?? 0;
+                              const iteration = ctx.iterationCount("reviewResult", `review-${num}`) + 1;
+                              return `Review PR #${prNum} for issue #${num} in ${OWNER}/${REPO} (review round ${iteration}).
 Fetch the diff and evaluate the changes for correctness, security, and quality.
-Issue title: ${info.title}`;
-                        })()}
-                      </Task>
+Issue title: ${info.title}
 
-                      {/* Merge if approved (compute) */}
+Remember: only set approved=false for BLOCKER issues (security, data loss, crashes).
+Approve if only minor/style issues remain.`;
+                            })()}
+                          </Task>
+                        </Sequence>
+                      </Ralph>
+
+                      {/* ── Merge after Ralph exits (approved or max iterations) ── */}
                       <Task id={`merge-${num}`} output={outputs.reviewResult} continueOnFail>
                         {async () => {
                           const pushResult = ctx.outputMaybe("agentResult", { nodeId: `push-${num}` });
@@ -417,13 +489,14 @@ Issue title: ${info.title}`;
                             };
                           }
 
+                          // Ralph exited at maxIterations without approval
                           await setLabels(num, ['needs-fix'], ['triaged']);
                           return {
                             prNumber: prNum,
                             issueNumber: num,
                             approved: false,
                             category: 'rejected' as const,
-                            feedback: review.feedback,
+                            feedback: `Still has blockers after ${MAX_FIX_ITERATIONS} attempts. ${review.feedback}`,
                           };
                         }}
                       </Task>
@@ -487,15 +560,53 @@ const result = await runWorkflow(workflow, {
     issueCount: issues.length,
   },
   onProgress: (event) => {
-    if (event.type === 'NodeStarted' && event.nodeId.startsWith('impl-')) {
-      const issueNum = Number(event.nodeId.replace('impl-', ''));
-      setLabels(issueNum, ['in-progress']).catch(() => {});
-    }
-    if (event.type === 'NodeFinished') {
-      console.log(`✓ ${event.nodeId} completed`);
-    }
-    if (event.type === 'NodeFailed') {
-      console.error(`✗ ${event.nodeId} failed: ${(event as any).error ?? 'unknown'}`);
+    const verbose = process.env.SMITHERS_VERBOSE === 'true';
+    const ts = new Date(event.timestampMs).toLocaleTimeString();
+
+    switch (event.type) {
+      case 'RunStarted':
+        console.log(`\n[${ts}] ▶ Run started (${event.runId})`);
+        break;
+      case 'RunFinished':
+        console.log(`[${ts}] ■ Run finished (${event.runId})`);
+        break;
+      case 'RunFailed':
+        console.error(`[${ts}] ■ Run FAILED: ${event.error}`);
+        break;
+      case 'NodeStarted':
+        console.log(`[${ts}] → ${event.nodeId} started (attempt ${event.attempt})`);
+        if (event.nodeId.startsWith('impl-')) {
+          const issueNum = Number(event.nodeId.replace('impl-', ''));
+          setLabels(issueNum, ['in-progress']).catch(() => {});
+        }
+        break;
+      case 'NodeFinished':
+        console.log(`[${ts}] ✓ ${event.nodeId} completed`);
+        break;
+      case 'NodeFailed':
+        console.error(`[${ts}] ✗ ${event.nodeId} FAILED (attempt ${event.attempt}): ${event.error}`);
+        break;
+      case 'NodeSkipped':
+        console.log(`[${ts}] ⊘ ${event.nodeId} skipped`);
+        break;
+      case 'NodeRetrying':
+        console.log(`[${ts}] ↻ ${event.nodeId} retrying (attempt ${event.attempt})`);
+        break;
+      case 'ToolCallStarted':
+        if (verbose) console.log(`[${ts}]   🔧 ${event.nodeId} → ${event.toolName}`);
+        break;
+      case 'ToolCallFinished':
+        if (verbose) console.log(`[${ts}]   🔧 ${event.nodeId} → ${event.toolName} [${event.status}]`);
+        break;
+      case 'NodeOutput':
+        if (verbose) {
+          const prefix = event.stream === 'stderr' ? '⚠' : '│';
+          process.stdout.write(`[${ts}]   ${prefix} ${event.nodeId}: ${event.text}\n`);
+        }
+        break;
+      case 'FrameCommitted':
+        if (verbose) console.log(`[${ts}] 📸 Frame #${event.frameNo} committed`);
+        break;
     }
   },
 });
